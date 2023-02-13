@@ -149,7 +149,7 @@ extern "C" {
 
     pub fn IOServiceAddMatchingNotification(
         notifyPort: IONotificationPortRef,
-        notificationType: *mut c_char,
+        notificationType: *const c_char,
         matching: CFDictionaryRef,
         callback: IOServiceMatchingCallback,
         refCon: *mut c_void,

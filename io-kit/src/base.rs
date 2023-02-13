@@ -1,10 +1,12 @@
 use std::ffi::CStr;
-use std::mem;
 
+use std::ffi::c_void;
+use std::mem;
 use std::os::raw::c_char;
 
 use core_foundation::base::TCFType;
 use core_foundation::dictionary::CFDictionary;
+use core_foundation::runloop::CFRunLoopSource;
 use core_foundation::string::CFString;
 use io_kit_sys::types::{io_iterator_t, io_object_t, io_service_t};
 use io_kit_sys::*;
@@ -55,7 +57,7 @@ impl Iterator for IOIterator {
 }
 
 impl IOIterator {
-    pub fn reset(&self) {
+    pub fn reset(&mut self) {
         unsafe { IOIteratorReset(self.as_io_object_t()) }
     }
 
@@ -74,6 +76,31 @@ impl TIOObject<io_iterator_t> for IOIterator {
     fn as_io_object_t(&self) -> io_object_t {
         self.as_concrete_io_object_t()
     }
+}
+
+type IOServiceMatchingCallbackFn<'notif_life> = Box<dyn FnMut(Vec<IOService>) + 'notif_life>;
+
+pub struct IOServiceMatchingNotification<'notif_life> {
+    _iterator: IOIterator,
+    _callback: IOServiceMatchingCallbackFn<'notif_life>,
+}
+
+fn make_services(iterator: &mut IOIterator) -> Vec<IOService> {
+    let mut services = Vec::new();
+    while let Some(obj) = iterator.next() {
+        services.push(IOService(obj.as_io_object_t()));
+    }
+    services
+}
+
+unsafe extern "C" fn service_matching_callback_internal(
+    refcon: *mut c_void,
+    iterator: io_iterator_t,
+) {
+    let callback = refcon as *mut IOServiceMatchingCallbackFn;
+    let mut iterator = IOIterator(iterator);
+    let services = make_services(&mut iterator);
+    (*callback)(services)
 }
 
 pub struct IOService(io_service_t);
@@ -100,7 +127,7 @@ impl IOService {
 
     pub fn get_matching_services(matching: CFDictionary) -> Result<Vec<Self>, i32> {
         unsafe {
-            let mut io_iterator_t: io_iterator_t = mem::uninitialized();
+            let mut io_iterator_t: io_iterator_t = 0;
 
             let result = IOServiceGetMatchingServices(
                 kIOMasterPortDefault,
@@ -125,6 +152,39 @@ impl IOService {
             }
 
             Ok(v)
+        }
+    }
+
+    pub fn add_matching_notification<'notif_life>(
+        notify_port: &IONotificationPort,
+        notification_type: *const c_char,
+        matching: CFDictionary,
+        callback: impl 'notif_life + FnMut(Vec<IOService>),
+    ) -> Result<IOServiceMatchingNotification<'notif_life>, i32> {
+        let mut callback = Box::new(Box::new(callback) as IOServiceMatchingCallbackFn);
+        let cbr = callback.as_mut() as *mut IOServiceMatchingCallbackFn;
+        let mut iterator: io_iterator_t = 0;
+        let result = unsafe {
+            IOServiceAddMatchingNotification(
+                notify_port.0,
+                notification_type,
+                matching.as_concrete_TypeRef(),
+                service_matching_callback_internal,
+                cbr as *mut c_void,
+                &mut iterator as *mut io_iterator_t,
+            )
+        };
+        mem::forget(matching); // the function consumed the reference
+        if result == KERN_SUCCESS {
+            let mut iterator = IOIterator(iterator);
+            let services = make_services(&mut iterator);
+            (*callback)(services);
+            Ok(IOServiceMatchingNotification {
+                _iterator: iterator,
+                _callback: callback,
+            })
+        } else {
+            Err(result)
         }
     }
 }
@@ -254,5 +314,31 @@ pub fn io_service_matching(name: *const c_char) -> Option<CFDictionary> {
         } else {
             Some(TCFType::wrap_under_get_rule(result as *const _))
         }
+    }
+}
+
+#[repr(transparent)]
+pub struct IONotificationPort(IONotificationPortRef);
+
+impl Drop for IONotificationPort {
+    fn drop(&mut self) {
+        unsafe { IONotificationPortDestroy(self.0) };
+    }
+}
+
+impl IONotificationPort {
+    pub fn new() -> Result<Self, ()> {
+        let port = unsafe { IONotificationPortCreate(kIOMasterPortDefault) };
+        if port.is_null() {
+            Err(())
+        } else {
+            Ok(Self(port))
+        }
+    }
+
+    pub fn get_run_loop_source(&self) -> CFRunLoopSource {
+        let source = unsafe { IONotificationPortGetRunLoopSource(self.0) };
+        assert!(!source.is_null());
+        unsafe { TCFType::wrap_under_get_rule(source) }
     }
 }
