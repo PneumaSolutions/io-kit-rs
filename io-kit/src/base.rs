@@ -89,6 +89,7 @@ fn make_services(iterator: &mut IOIterator) -> Vec<IOService> {
     let mut services = Vec::new();
     while let Some(obj) = iterator.next() {
         services.push(IOService(obj.as_io_object_t()));
+        mem::forget(obj); // the reference is taken over by the service
     }
     services
 }
@@ -100,6 +101,7 @@ unsafe extern "C" fn service_matching_callback_internal(
     let callback = refcon as *mut IOServiceMatchingCallbackFn;
     let mut iterator = IOIterator(iterator);
     let services = make_services(&mut iterator);
+    mem::forget(iterator); // we're only borrowing the iterator
     (*callback)(services)
 }
 
