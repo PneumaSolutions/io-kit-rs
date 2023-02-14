@@ -189,6 +189,16 @@ impl IOService {
             Err(result)
         }
     }
+
+    pub fn get_registry_entry_id(&self) -> Result<u64, i32> {
+        let mut id = 0u64;
+        let result = unsafe { IORegistryEntryGetRegistryEntryID(self.0, &mut id as *mut u64) };
+        if result == KERN_SUCCESS {
+            Ok(id)
+        } else {
+            Err(result)
+        }
+    }
 }
 
 impl TIOObject<io_service_t> for IOService {
