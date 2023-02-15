@@ -6,7 +6,7 @@ use std::os::raw::c_char;
 
 use core_foundation::base::TCFType;
 use core_foundation::dictionary::CFDictionary;
-use core_foundation::runloop::CFRunLoopSource;
+use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop, CFRunLoopSource};
 use core_foundation::string::CFString;
 use io_kit_sys::types::{io_iterator_t, io_object_t, io_service_t};
 use io_kit_sys::*;
@@ -81,8 +81,18 @@ impl TIOObject<io_iterator_t> for IOIterator {
 type IOServiceMatchingCallbackFn<'notif_life> = Box<dyn FnMut(Vec<IOService>) + 'notif_life>;
 
 pub struct IOServiceMatchingNotification<'notif_life> {
+    _notify_port: IONotificationPort,
+    run_loop: CFRunLoop,
+    run_loop_source: CFRunLoopSource,
     _iterator: IOIterator,
     _callback: IOServiceMatchingCallbackFn<'notif_life>,
+}
+
+impl<'notif_lifetime> Drop for IOServiceMatchingNotification<'notif_lifetime> {
+    fn drop(&mut self) {
+        self.run_loop
+            .remove_source(&self.run_loop_source, unsafe { kCFRunLoopCommonModes });
+    }
 }
 
 fn make_services(iterator: &mut IOIterator) -> Vec<IOService> {
@@ -158,11 +168,14 @@ impl IOService {
     }
 
     pub fn add_matching_notification<'notif_life>(
-        notify_port: &IONotificationPort,
         notification_type: *const c_char,
         matching: CFDictionary,
         callback: impl 'notif_life + FnMut(Vec<IOService>),
     ) -> Result<IOServiceMatchingNotification<'notif_life>, i32> {
+        let notify_port = IONotificationPort::new().unwrap();
+        let run_loop = CFRunLoop::get_current();
+        let run_loop_source = notify_port.get_run_loop_source();
+        run_loop.add_source(&run_loop_source, unsafe { kCFRunLoopCommonModes });
         let mut callback = Box::new(Box::new(callback) as IOServiceMatchingCallbackFn);
         let cbr = callback.as_mut() as *mut IOServiceMatchingCallbackFn;
         let mut iterator: io_iterator_t = 0;
@@ -182,6 +195,9 @@ impl IOService {
             let services = make_services(&mut iterator);
             (*callback)(services);
             Ok(IOServiceMatchingNotification {
+                _notify_port: notify_port,
+                run_loop,
+                run_loop_source,
                 _iterator: iterator,
                 _callback: callback,
             })
@@ -330,7 +346,7 @@ pub fn io_service_matching(name: *const c_char) -> Option<CFDictionary> {
 }
 
 #[repr(transparent)]
-pub struct IONotificationPort(IONotificationPortRef);
+struct IONotificationPort(IONotificationPortRef);
 
 impl Drop for IONotificationPort {
     fn drop(&mut self) {
@@ -339,7 +355,7 @@ impl Drop for IONotificationPort {
 }
 
 impl IONotificationPort {
-    pub fn new() -> Result<Self, ()> {
+    fn new() -> Result<Self, ()> {
         let port = unsafe { IONotificationPortCreate(kIOMasterPortDefault) };
         if port.is_null() {
             Err(())
@@ -348,7 +364,7 @@ impl IONotificationPort {
         }
     }
 
-    pub fn get_run_loop_source(&self) -> CFRunLoopSource {
+    fn get_run_loop_source(&self) -> CFRunLoopSource {
         let source = unsafe { IONotificationPortGetRunLoopSource(self.0) };
         assert!(!source.is_null());
         unsafe { TCFType::wrap_under_get_rule(source) }
